@@ -20,7 +20,7 @@ Or create the repo by hand at https://github.com/new (name it `tiny-world-model`
 **don't** add a README or .gitignore — this folder already has them) and then:
 
 ```bash
-git remote add origin https://github.com/YOUR_USERNAME/tiny-world-model.git && git push -u origin main
+git remote add origin https://github.com/ayush29feb/tiny-world-model.git && git push -u origin main
 ```
 
 ## 2. If the repo is private: make a token for Colab
@@ -46,7 +46,7 @@ that *does* get saved into the notebook and pushed to GitHub.
 Once pushed, this URL opens it directly (replace the username):
 
 ```
-https://colab.research.google.com/github/YOUR_USERNAME/tiny-world-model/blob/main/notebooks/colab_bootstrap.ipynb
+https://colab.research.google.com/github/ayush29feb/tiny-world-model/blob/main/notebooks/colab_bootstrap.ipynb
 ```
 
 For a private repo, Colab needs GitHub authorization to open it that way:

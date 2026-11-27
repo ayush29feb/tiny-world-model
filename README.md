@@ -44,7 +44,7 @@ Open `notebooks/colab_bootstrap.ipynb` in Colab and run it top to bottom:
 Direct link once the repo is pushed (replace the username):
 
 ```
-https://colab.research.google.com/github/YOUR_USERNAME/tiny-world-model/blob/main/notebooks/colab_bootstrap.ipynb
+https://colab.research.google.com/github/ayush29feb/tiny-world-model/blob/main/notebooks/colab_bootstrap.ipynb
 ```
 
 ### Syncing after you edit locally
