@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Project artifacts — checkpoints are big and regenerable
+artifacts/
+wandb/
+*.pt
+*.ckpt
+
+# Notebook noise: strip outputs before committing (see nbstripout below)
+.ipynb_checkpoints/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+.env

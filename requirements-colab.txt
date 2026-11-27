@@ -1,0 +1,5 @@
+# Extra deps for Colab. Torch/torchvision already present in the runtime.
+einops>=0.7
+omegaconf>=2.3
+wandb>=0.17
+imageio[ffmpeg]>=2.34

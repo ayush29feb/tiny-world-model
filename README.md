@@ -1,0 +1,89 @@
+# tiny-world-model
+
+A small next-frame predictor, set up so the same code runs on a laptop (Claude Code) and on
+a Google Colab GPU, with GitHub as the only thing in between.
+
+## How the loop works
+
+```
+  laptop / Claude Code                GitHub                    Colab
+  ────────────────────                ──────                    ─────
+  edit src/, run pytest   ──push──>   main   ──pull (cell 2)──>  pip install -e .
+                                                                 train on GPU
+                          <─────── checkpoints via Drive ───────
+```
+
+Code lives in `src/`, not in notebooks. Notebooks only orchestrate — that keeps diffs
+reviewable, makes the logic testable in CI, and avoids merge conflicts in JSON.
+
+## Local setup
+
+```bash
+uv venv --python 3.13
+source .venv/bin/activate
+uv pip install -e ".[local,dev]"
+pytest -q
+```
+
+Tests are CPU-only and take seconds; run them before pushing to Colab.
+
+A short smoke run on your own machine (MPS on Apple silicon):
+
+```bash
+python scripts/train.py --epochs 1 --n-rollouts 32 --num-workers 0
+```
+
+## Colab
+
+Open `notebooks/colab_bootstrap.ipynb` in Colab and run it top to bottom:
+
+1. Set `REPO` in cell 2 to `your-username/tiny-world-model`.
+2. Runtime → Change runtime type → **T4 GPU**.
+3. For a private repo, add a GitHub token as a Colab secret named `GITHUB_TOKEN`.
+
+Direct link once the repo is pushed (replace the username):
+
+```
+https://colab.research.google.com/github/YOUR_USERNAME/tiny-world-model/blob/main/notebooks/colab_bootstrap.ipynb
+```
+
+### Syncing after you edit locally
+
+Commit and push, then re-run **cell 2** (git pull) in Colab. Because the package is
+installed with `pip install -e .` and the notebook uses `%autoreload 2`, the new code is
+picked up without restarting the runtime or reinstalling.
+
+Restart the runtime only when `pyproject.toml` dependencies change.
+
+### Checkpoints survive disconnects
+
+`artifacts_dir()` resolves in this order:
+
+1. `$TWM_ARTIFACTS` if set
+2. `/content/drive/MyDrive/tiny-world-model/artifacts` when Drive is mounted on Colab
+3. `./artifacts` locally
+
+Training writes `checkpoint.pt` after every epoch and `train()` resumes from it by default,
+so a dropped Colab session costs you at most one epoch.
+
+## Layout
+
+```
+src/tiny_world_model/
+  env.py              device + path resolution (laptop vs Colab)
+  data/bouncing.py    synthetic dataset, no download needed
+  models/predictor.py conv next-frame predictor
+  training/train.py   loop with checkpoint/resume + AMP
+scripts/train.py      CLI entrypoint
+notebooks/            Colab orchestration only
+tests/                fast CPU tests, run in CI
+```
+
+## Notebook hygiene
+
+Committed notebook outputs create noisy diffs and can leak data. Strip them automatically:
+
+```bash
+uv pip install nbstripout
+nbstripout --install --attributes .gitattributes
+```
