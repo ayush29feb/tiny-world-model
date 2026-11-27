@@ -72,9 +72,22 @@ src/tiny_world_model/
   models/predictor.py conv next-frame predictor
   training/train.py   loop with checkpoint/resume + AMP
 scripts/train.py      CLI entrypoint
+scripts/gpu_check.py  runtime preflight: device, AMP, throughput
 notebooks/            Colab orchestration only
 tests/                fast CPU tests, run in CI
 ```
+
+## Checking a runtime
+
+```bash
+python scripts/gpu_check.py                # whatever device is available
+python scripts/gpu_check.py --require-gpu  # fail if CUDA is missing
+python scripts/gpu_check.py --device cpu   # force a device
+```
+
+Checks the accelerator is real, that mixed precision actually engages, that a training
+step reduces the loss, and reports throughput and peak GPU memory. Exits non-zero on
+failure. Cell 5 of the Colab notebook runs it with `--require-gpu`.
 
 ## Notebook hygiene
 

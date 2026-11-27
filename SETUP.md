@@ -33,7 +33,7 @@ pytest -q
 `%autoreload 2` plus the editable install means no runtime restart and no reinstall —
 only when `pyproject.toml` dependencies change.
 
-Checkpoints go to Drive (cell 5), so training resumes where it left off even if the
+Checkpoints go to Drive (cell 6), so training resumes where it left off even if the
 runtime disconnects.
 
 ## If you make the repo private later
