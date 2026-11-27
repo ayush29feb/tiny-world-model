@@ -35,17 +35,14 @@ python scripts/train.py --epochs 1 --n-rollouts 32 --num-workers 0
 
 ## Colab
 
-Open `notebooks/colab_bootstrap.ipynb` in Colab and run it top to bottom:
-
-1. Set `REPO` in cell 2 to `your-username/tiny-world-model`.
-2. Runtime → Change runtime type → **T4 GPU**.
-3. For a private repo, add a GitHub token as a Colab secret named `GITHUB_TOKEN`.
-
-Direct link once the repo is pushed (replace the username):
+Open the notebook on a GPU runtime and run it top to bottom — the repo is public, so the
+clone needs no token:
 
 ```
 https://colab.research.google.com/github/ayush29feb/tiny-world-model/blob/main/notebooks/colab_bootstrap.ipynb
 ```
+
+Set **Runtime → Change runtime type → T4 GPU** first, or cell 1 will report no GPU.
 
 ### Syncing after you edit locally
 
