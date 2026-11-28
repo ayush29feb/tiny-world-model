@@ -26,8 +26,16 @@ class Recorder:
 
 def tiny_config(**overrides):
     base = dict(
-        model=TINY, steps=6, batch_size=2, num_workers=0, device="cpu", warmup_steps=2,
-        log_every=2, sample_every=3, sample_clips=2, sample_steps=2,
+        model=TINY,
+        steps=6,
+        batch_size=2,
+        num_workers=0,
+        device="cpu",
+        warmup_steps=2,
+        log_every=2,
+        sample_every=3,
+        sample_clips=2,
+        sample_steps=2,
     )
     base.update(overrides)
     return TrainConfig(**base)
@@ -149,3 +157,69 @@ def test_reset_ema_option_restarts_it(tmp_path):
     reset = tiny_config(steps=4, checkpoint_dir=str(tmp_path), reset_ema=True)
     ema = train(reset, monitor=Recorder())
     assert _same_weights(ema.state_dict(), state["model"])
+
+
+# --- speed changes -----------------------------------------------------------------
+
+
+def test_batched_ema_update_matches_the_formula():
+    import copy
+
+    from tiny_world_model.dit import DiT
+    from tiny_world_model.train import _update_ema
+
+    torch.manual_seed(0)
+    model = DiT(TINY)
+    for p in model.parameters():
+        p.data.normal_()
+    ema = copy.deepcopy(model)
+    for p in ema.parameters():
+        p.data.normal_()
+    expected = [
+        e.detach() * 0.9 + m.detach() * 0.1
+        for e, m in zip(ema.parameters(), model.parameters(), strict=True)
+    ]
+    _update_ema(ema, model, 0.9)
+    for got, want in zip(ema.parameters(), expected, strict=True):
+        assert torch.allclose(got, want, atol=1e-6)
+
+
+def test_gpu_stats_are_empty_off_the_gpu():
+    from tiny_world_model.train import gpu_stats
+
+    assert gpu_stats("cpu") == {}
+    assert gpu_stats("mps") == {}
+
+
+def test_compiled_training_saves_plain_weight_names(tmp_path):
+    from tiny_world_model.dit import DiT
+
+    cfg = tiny_config(
+        steps=2,
+        log_every=1,
+        sample_every=2,
+        compile=True,
+        checkpoint_dir=str(tmp_path),
+        checkpoint_every=2,
+    )
+    rec = Recorder()
+    train(cfg, monitor=rec)
+    assert [s for s, _ in rec.logs] == [1, 2]
+    state = torch.load(tmp_path / "checkpoint.pt", weights_only=False)
+    assert not any(k.startswith("_orig_mod.") for k in state["model"])
+    DiT(TINY).load_state_dict(state["model"])  # loads into an uncompiled model
+
+
+def test_live_monitor_plots_gpu_stats(tmp_path):
+    pytest.importorskip("IPython")
+    pytest.importorskip("matplotlib")
+    from tiny_world_model.notebook import LiveMonitor
+
+    monitor = LiveMonitor()
+    for step, util in ((25, 60.0), (50, 85.0)):
+        monitor.on_log(
+            step,
+            {"loss": 0.5, "clips_per_sec": 200.0, "lr": 3e-4, "gpu_util": util, "gpu_mem_gb": 5.4},
+        )
+    (tmp_path / "plot.png").write_bytes(monitor._plot_png())
+    assert monitor.gpu_utils == [60.0, 85.0] and monitor.gpu_mem == 5.4

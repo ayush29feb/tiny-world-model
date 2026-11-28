@@ -170,7 +170,8 @@ has not been run yet.
 
 ### Training (`train.py`)
 
-AdamW, lr 3e-4 with 500 warmup steps then constant, grad clip 1.0, batch 32.
+AdamW (fused on CUDA), lr 3e-4 with 500 warmup steps then constant, grad clip 1.0,
+batch 64.
 **Samples always come from an EMA of the weights**, drawn from the same fixed noise each
 time so progress is comparable. The EMA decay warms up as `min(0.999, (1+n)/(10+n))`
 over its n updates (see the gotcha below). The samples panel shows the fraction of
@@ -179,6 +180,15 @@ pixels on: real clips are ~5%, and ~50% means the samples are still noise. fp16 
 every `checkpoint_every` steps (write, then rename) and resumes automatically; the data
 seed is offset by the resume step so resumed runs don't replay the same clips.
 
+**Keeping the GPU busy.** The loop is written so the CPU never waits for the GPU
+between steps: the running loss stays on the device and is read only at log time;
+fused AdamW checks fp16 overflow on the GPU (otherwise `GradScaler.step` reads it back
+every step); the EMA is one `torch._foreach_lerp_` instead of a launch per tensor.
+**Don't add a per-step `.item()`, `print(loss)` or other GPU→CPU read** to the loop.
+`TrainConfig(compile=True)` runs the model through `torch.compile` (checkpoints still
+save the uncompiled weights). Each log reports GPU busy % (nvidia-smi) and peak memory,
+plotted on the speed panel.
+
 ### Measured speeds
 
 | What | Where | Speed |
@@ -186,6 +196,7 @@ seed is offset by the resume step so resumed runs don't replay the same clips.
 | Data generation | 1 CPU core | ~1,400 clips/s |
 | Training, width 128 | Apple M-series GPU (MPS) | **~13 clips/s**, flat for batch 8–32, fp32/bf16/fp16 alike |
 | Training, width 128 | Colab T4, batch 32, fp16 | **~100 clips/s** (~3 steps/s; 20k steps ≈ 1.8 h) |
+| Training, width 128 | Colab T4, batch 64, fused AdamW, no per-step sync | not measured yet |
 
 Training is model-bound everywhere: 2 data workers make ~2,700 clips/s, 27× what the
 T4 trains on. The Mac is only good for checking that things run. Train on Colab.

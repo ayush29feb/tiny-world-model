@@ -16,6 +16,7 @@ steps since the last save.
 from __future__ import annotations
 
 import copy
+import subprocess
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -32,7 +33,7 @@ from tiny_world_model.flow import flow_matching_loss, sample
 class TrainConfig:
     model: DiTConfig = field(default_factory=DiTConfig)
     steps: int = 20_000
-    batch_size: int = 32
+    batch_size: int = 64  # width-128 matmuls are small; bigger batches keep a GPU busier
     lr: float = 3e-4
     warmup_steps: int = 500
     weight_decay: float = 0.0
@@ -40,6 +41,7 @@ class TrainConfig:
     ema_decay: float = 0.999  # samples come from an exponential moving average of weights
     reset_ema: bool = False  # on resume, restart the EMA from the trained weights
     amp: bool = True  # fp16 mixed precision on CUDA; ignored elsewhere
+    compile: bool = False  # torch.compile the model: faster steps, a few minutes to compile
 
     data_seed: int = 0
     num_workers: int = 2
@@ -59,9 +61,14 @@ class PrintMonitor:
     """Default monitor: print a line per log, and a note when samples are made."""
 
     def on_log(self, step: int, metrics: dict) -> None:
+        gpu = ""
+        if "gpu_util" in metrics:
+            gpu += f"  GPU busy {metrics['gpu_util']:.0f}%"
+        if "gpu_mem_gb" in metrics:
+            gpu += f"  {metrics['gpu_mem_gb']:.1f} GB"
         print(
             f"step {step:6d}  loss {metrics['loss']:.4f}  "
-            f"{metrics['clips_per_sec']:.0f} clips/s  lr {metrics['lr']:.2e}",
+            f"{metrics['clips_per_sec']:.0f} clips/s  lr {metrics['lr']:.2e}{gpu}",
             flush=True,
         )
 
@@ -95,8 +102,24 @@ def ema_decay_at(updates: int, max_decay: float) -> float:
 
 @torch.no_grad()
 def _update_ema(ema: DiT, model: DiT, decay: float) -> None:
-    for e, p in zip(ema.parameters(), model.parameters(), strict=True):
-        e.lerp_(p, 1 - decay)
+    # One batched operation over all weight tensors, not one GPU launch per tensor.
+    torch._foreach_lerp_(list(ema.parameters()), list(model.parameters()), 1 - decay)
+
+
+def gpu_stats(device: str) -> dict:
+    """How busy the GPU was recently (nvidia-smi) and peak memory PyTorch allocated."""
+    if device != "cuda":
+        return {}
+    stats = {"gpu_mem_gb": torch.cuda.max_memory_allocated() / 1e9}
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=2, check=True,
+        ).stdout
+        stats["gpu_util"] = float(out.split()[0])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        pass  # no nvidia-smi: report memory only
+    return stats
 
 
 def _checkpoint_path(cfg: TrainConfig) -> Path | None:
@@ -133,7 +156,11 @@ def train(cfg: TrainConfig | None = None, monitor=None) -> DiT:
 
     model = DiT(cfg.model).to(device)
     ema = copy.deepcopy(model).requires_grad_(False)
-    opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    # Fused AdamW on CUDA runs the step as one kernel, and checks fp16 overflow on the
+    # GPU instead of GradScaler reading it back to the CPU every step.
+    opt = torch.optim.AdamW(
+        model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay, fused=device == "cuda"
+    )
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     start, ema_updates = 0, 0
@@ -168,14 +195,21 @@ def train(cfg: TrainConfig | None = None, monitor=None) -> DiT:
     )
     batches = iter(loader)
 
+    # Compile a wrapper and keep `model` itself for checkpoints, so saved weights don't
+    # get the wrapper's "_orig_mod." prefix and load either way.
+    step_model = torch.compile(model) if cfg.compile else model
+
     print(
         f"device={device}  amp={use_amp}  params={model.num_params():,}  "
-        f"tokens/clip={cfg.model.num_tokens}  batch={cfg.batch_size}",
+        f"tokens/clip={cfg.model.num_tokens}  batch={cfg.batch_size}  compile={cfg.compile}",
         flush=True,
     )
 
     model.train()
-    window_loss, window_steps, window_clips = 0.0, 0, 0
+    # The running loss stays on the device and is read only when logging, so the CPU
+    # never waits for the GPU between steps and can queue work ahead.
+    window_loss = torch.zeros((), device=device)
+    window_steps, window_clips = 0, 0
     window_start, paused = time.perf_counter(), 0.0
     for step in range(start, cfg.steps):
         frames = next(batches)["frames"].to(device, non_blocking=True)
@@ -184,7 +218,7 @@ def train(cfg: TrainConfig | None = None, monitor=None) -> DiT:
             group["lr"] = _lr_at(step, cfg)
         opt.zero_grad(set_to_none=True)
         with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
-            loss = flow_matching_loss(model, frames)
+            loss = flow_matching_loss(step_model, frames)
         scaler.scale(loss).backward()
         scaler.unscale_(opt)
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -193,22 +227,25 @@ def train(cfg: TrainConfig | None = None, monitor=None) -> DiT:
         _update_ema(ema, model, ema_decay_at(ema_updates, cfg.ema_decay))
         ema_updates += 1
 
-        window_loss += loss.item()
+        window_loss += loss.detach()
         window_steps += 1
         window_clips += frames.shape[0]
         done = step + 1
 
         if done % cfg.log_every == 0 or done == cfg.steps:
+            mean_loss = window_loss.item() / window_steps  # waits for queued GPU work
             elapsed = time.perf_counter() - window_start - paused  # training time only
             monitor.on_log(
                 done,
                 {
-                    "loss": window_loss / window_steps,
+                    "loss": mean_loss,
                     "clips_per_sec": window_clips / max(elapsed, 1e-9),
                     "lr": opt.param_groups[0]["lr"],
+                    **gpu_stats(device),
                 },
             )
-            window_loss, window_steps, window_clips = 0.0, 0, 0
+            window_loss = torch.zeros((), device=device)
+            window_steps, window_clips = 0, 0
             window_start, paused = time.perf_counter(), 0.0
 
         if done % cfg.sample_every == 0 or done == cfg.steps:

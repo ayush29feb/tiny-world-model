@@ -27,6 +27,8 @@ class LiveMonitor:
         self.steps: list[int] = []
         self.losses: list[float] = []
         self.speeds: list[float] = []
+        self.gpu_utils: list[float | None] = []
+        self.gpu_mem: float | None = None
         # Explicit handles, so each output updates in place. (display(display_id=True)
         # returns None outside a notebook, which would break running this in tests.)
         self.plot, self.samples = DisplayHandle(), DisplayHandle()
@@ -39,6 +41,8 @@ class LiveMonitor:
         self.steps.append(step)
         self.losses.append(metrics["loss"])
         self.speeds.append(metrics["clips_per_sec"])
+        self.gpu_utils.append(metrics.get("gpu_util"))
+        self.gpu_mem = metrics.get("gpu_mem_gb", self.gpu_mem)
         self.plot.update(Image(data=self._plot_png(), format="png"))
 
     def on_samples(self, step: int, clips) -> None:
@@ -79,11 +83,24 @@ class LiveMonitor:
         loss_ax.grid(alpha=0.3, which="both")
         loss_ax.legend(frameon=False)
 
-        speed_ax.plot(self.steps, self.speeds, color="#2a6fdb", lw=1.5)
+        speed_ax.plot(self.steps, self.speeds, color="#2a6fdb", lw=1.5, label="clips/s")
         speed_ax.set_ylim(bottom=0)
         speed_ax.set_xlabel("step")
-        speed_ax.set_title(f"training speed: {self.speeds[-1]:.0f} clips/s")
+        speed_ax.set_ylabel("clips/s", color="#2a6fdb")
         speed_ax.grid(alpha=0.3)
+        title = f"training speed: {self.speeds[-1]:.0f} clips/s"
+
+        # GPU utilization on a second axis, when nvidia-smi is available.
+        util = [(s, u) for s, u in zip(self.steps, self.gpu_utils, strict=True) if u is not None]
+        if util:
+            util_ax = speed_ax.twinx()
+            util_ax.plot(*zip(*util, strict=True), color="#e07b39", lw=1.5)
+            util_ax.set_ylim(0, 105)
+            util_ax.set_ylabel("GPU busy %", color="#e07b39")
+            title += f"\nGPU busy {util[-1][1]:.0f}%"
+        if self.gpu_mem is not None:
+            title += f"{',' if util else chr(10)} {self.gpu_mem:.1f} GB peak"
+        speed_ax.set_title(title)
 
         fig.tight_layout()
         buf = io.BytesIO()
