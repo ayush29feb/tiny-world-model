@@ -16,6 +16,7 @@ steps since the last save.
 from __future__ import annotations
 
 import copy
+import itertools
 import subprocess
 import time
 from dataclasses import asdict, dataclass, field
@@ -24,9 +25,10 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
+from games.dino import clip_stream
 from games.dino.dataset import DinoClips
 from tiny_world_model.dit import DiT, DiTConfig
-from tiny_world_model.flow import flow_matching_loss, sample
+from tiny_world_model.flow import Schedule, flow_matching_loss, sample, validation_loss
 
 
 @dataclass
@@ -34,7 +36,7 @@ class TrainConfig:
     model: DiTConfig = field(default_factory=DiTConfig)
     steps: int = 20_000
     batch_size: int = 64  # width-128 matmuls are small; bigger batches keep a GPU busier
-    lr: float = 3e-4
+    lr: float = 6e-4
     warmup_steps: int = 500
     weight_decay: float = 0.0
     grad_clip: float = 1.0
@@ -42,6 +44,9 @@ class TrainConfig:
     reset_ema: bool = False  # on resume, restart the EMA from the trained weights
     amp: bool = True  # fp16 mixed precision on CUDA; ignored elsewhere
     compile: bool = False  # torch.compile the model: faster steps, a few minutes to compile
+
+    # Which noise levels training uses; see tiny_world_model.flow.Schedule.
+    schedule: Schedule = field(default_factory=Schedule)
 
     data_seed: int = 0
     num_workers: int = 2
@@ -51,6 +56,13 @@ class TrainConfig:
     sample_clips: int = 8
     sample_steps: int = 50
     sample_seed: int = 1234  # the same noise every time, so you can watch samples improve
+    sample_shift: float | None = None  # shift of the sampling time grid; None = schedule's
+
+    # Validation loss on fixed clips, fixed noise and evenly spaced noise levels. Unlike
+    # the training loss it doesn't depend on the schedule, so runs can be compared.
+    val_every: int = 250  # 0 turns it off
+    val_clips: int = 32
+    val_seed: int = 1  # a different seed from training data
 
     checkpoint_dir: str | None = None
     checkpoint_every: int = 1000
@@ -66,6 +78,8 @@ class PrintMonitor:
             gpu += f"  GPU busy {metrics['gpu_util']:.0f}%"
         if "gpu_mem_gb" in metrics:
             gpu += f"  {metrics['gpu_mem_gb']:.1f} GB"
+        if "val_loss" in metrics:
+            gpu += f"  val {metrics['val_loss']:.4f} (EMA {metrics['val_loss_ema']:.4f})"
         print(
             f"step {step:6d}  loss {metrics['loss']:.4f}  "
             f"{metrics['clips_per_sec']:.0f} clips/s  lr {metrics['lr']:.2e}{gpu}",
@@ -195,6 +209,19 @@ def train(cfg: TrainConfig | None = None, monitor=None) -> DiT:
     )
     batches = iter(loader)
 
+    # A fixed validation set: clips from a different seed, and fixed noise to go with them.
+    val_frames = val_noise = None
+    if cfg.val_every > 0:
+        clips = itertools.islice(
+            clip_stream(cfg.val_seed, clip_len=cfg.model.frames - 1), cfg.val_clips
+        )
+        val_frames = torch.stack([torch.from_numpy(c.frames) for c in clips]).to(device)
+        gen = torch.Generator(device=device).manual_seed(cfg.val_seed)
+        val_noise = torch.randn(
+            cfg.val_clips, cfg.model.num_tokens, cfg.model.patching.patch_dim,
+            generator=gen, device=device,
+        )
+
     # Compile a wrapper and keep `model` itself for checkpoints, so saved weights don't
     # get the wrapper's "_orig_mod." prefix and load either way.
     step_model = torch.compile(model) if cfg.compile else model
@@ -218,7 +245,7 @@ def train(cfg: TrainConfig | None = None, monitor=None) -> DiT:
             group["lr"] = _lr_at(step, cfg)
         opt.zero_grad(set_to_none=True)
         with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
-            loss = flow_matching_loss(step_model, frames)
+            loss = flow_matching_loss(step_model, frames, cfg.schedule)
         scaler.scale(loss).backward()
         scaler.unscale_(opt)
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -232,7 +259,18 @@ def train(cfg: TrainConfig | None = None, monitor=None) -> DiT:
         window_clips += frames.shape[0]
         done = step + 1
 
-        if done % cfg.log_every == 0 or done == cfg.steps:
+        val = {}
+        if cfg.val_every > 0 and (done % cfg.val_every == 0 or done == cfg.steps):
+            val_start = time.perf_counter()
+            with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
+                model.eval()
+                val["val_loss"] = validation_loss(model, val_frames, val_noise)
+                model.train()
+                ema.eval()
+                val["val_loss_ema"] = validation_loss(ema, val_frames, val_noise)
+            paused += time.perf_counter() - val_start
+
+        if done % cfg.log_every == 0 or done == cfg.steps or val:
             mean_loss = window_loss.item() / window_steps  # waits for queued GPU work
             elapsed = time.perf_counter() - window_start - paused  # training time only
             monitor.on_log(
@@ -242,6 +280,7 @@ def train(cfg: TrainConfig | None = None, monitor=None) -> DiT:
                     "clips_per_sec": window_clips / max(elapsed, 1e-9),
                     "lr": opt.param_groups[0]["lr"],
                     **gpu_stats(device),
+                    **val,
                 },
             )
             window_loss = torch.zeros((), device=device)
@@ -252,7 +291,10 @@ def train(cfg: TrainConfig | None = None, monitor=None) -> DiT:
             sampling_start = time.perf_counter()
             ema.eval()
             gen = torch.Generator(device=device).manual_seed(cfg.sample_seed)
-            clips = sample(ema, cfg.sample_clips, steps=cfg.sample_steps, generator=gen)
+            shift = cfg.schedule.shift if cfg.sample_shift is None else cfg.sample_shift
+            clips = sample(
+                ema, cfg.sample_clips, steps=cfg.sample_steps, generator=gen, shift=shift
+            )
             monitor.on_samples(done, clips.cpu())
             paused += time.perf_counter() - sampling_start
 

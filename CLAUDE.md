@@ -124,6 +124,10 @@ Not yet measured on Colab, whose CPUs are likely slower.
 
 ### Gotchas
 
+- **Compare runs by the validation loss, never the training loss.** The training loss
+  averages over the schedule's noise levels, and noisier levels have a higher loss, so
+  changing the schedule moves it with no change in the model. In a small test run the
+  training loss read 0.64 while the validation loss of the same model read 0.71.
 - **Each DataLoader worker must get its own seed** (see `DinoClips.__iter__`), or every
   worker plays identical games and batches fill with duplicates.
   `test_each_worker_plays_its_own_games` guards this.
@@ -165,13 +169,28 @@ has not been run yet.
 - Pixels are mapped to **−1 (off) / +1 (on)**: `to_signed`. Generated values are
   thresholded at 0: `to_bool`.
 - **t = 0 is noise, t = 1 is data.** `x_t = (1 − t)·noise + t·data`, the model predicts
-  velocity `v = data − noise`, loss is MSE. t is sampled uniformly.
-- Sampling: 50 Euler steps from t = 0 to 1, then threshold.
+  velocity `v = data − noise`, loss is MSE. The path is straight (rectified flow).
+- **Training noise levels: logit-normal(0, 1), shifted toward noise by 3** (`Schedule`).
+  The shift is SD3's: with noise level σ = 1 − t, σ' = 3σ / (1 + 2σ). Clips are large and
+  redundant (32 near-identical frames, 95% background), so their layout survives heavy
+  noise and gets decided there. 3 comes from SD3's √(size / 16k) rule (√(197k/16k) ≈ 3.5);
+  it's a starting point, not tuned.
+
+  | schedule | median t | steps with t < 0.3 |
+  |---|---|---|
+  | uniform | 0.50 | 30% |
+  | logit-normal | 0.50 | 20% |
+  | **logit-normal + shift 3 (default)** | **0.25** | **60%** |
+- Sampling: 50 Euler steps on a time grid with the same shift (half the steps are below
+  t = 0.25), then threshold at 0.
+- **`validation_loss`**: the velocity loss on fixed clips (seed 1), fixed noise and 8
+  evenly spaced noise levels. Deterministic, and independent of the training schedule.
 
 ### Training (`train.py`)
 
-AdamW (fused on CUDA), lr 3e-4 with 500 warmup steps then constant, grad clip 1.0,
-batch 64.
+AdamW (fused on CUDA), lr 6e-4 with 500 warmup steps then constant, grad clip 1.0,
+batch 64. Every 250 steps it computes the validation loss for both the trained and the
+EMA weights; both are plotted with the training loss.
 **Samples always come from an EMA of the weights**, drawn from the same fixed noise each
 time so progress is comparable. The EMA decay warms up as `min(0.999, (1+n)/(10+n))`
 over its n updates (see the gotcha below). The samples panel shows the fraction of
@@ -203,6 +222,10 @@ T4 trains on. The Mac is only good for checking that things run. Train on Colab.
 
 ### Gotchas
 
+- **Compare runs by the validation loss, never the training loss.** The training loss
+  averages over the schedule's noise levels, and noisier levels have a higher loss, so
+  changing the schedule moves it with no change in the model. In a small test run the
+  training loss read 0.64 while the validation loss of the same model read 0.71.
 - **An EMA with a fixed 0.999 decay from step 0 makes samples look like pure noise**
   (~50% of pixels on, no structure) for thousands of steps, even while the loss falls
   normally. It still holds 0.999ⁿ of the untrained model (37% at step 1,000), whose

@@ -36,6 +36,7 @@ def tiny_config(**overrides):
         sample_every=3,
         sample_clips=2,
         sample_steps=2,
+        val_every=0,  # building a validation set takes ~2s; only the val tests turn it on
     )
     base.update(overrides)
     return TrainConfig(**base)
@@ -223,3 +224,30 @@ def test_live_monitor_plots_gpu_stats(tmp_path):
         )
     (tmp_path / "plot.png").write_bytes(monitor._plot_png())
     assert monitor.gpu_utils == [60.0, 85.0] and monitor.gpu_mem == 5.4
+
+
+# --- validation loss ----------------------------------------------------------------
+
+
+def test_validation_loss_is_logged_on_schedule():
+    rec = Recorder()
+    train(tiny_config(steps=4, log_every=4, val_every=2, val_clips=2), monitor=rec)
+    with_val = [(s, m) for s, m in rec.logs if "val_loss" in m]
+    assert [s for s, _ in with_val] == [2, 4]  # step 2 is logged because of validation
+    for _, m in with_val:
+        assert m["val_loss"] > 0 and m["val_loss_ema"] > 0
+
+
+def test_live_monitor_plots_validation_loss(tmp_path):
+    pytest.importorskip("IPython")
+    pytest.importorskip("matplotlib")
+    from tiny_world_model.notebook import LiveMonitor
+
+    monitor = LiveMonitor()
+    monitor.on_log(25, {"loss": 0.5, "clips_per_sec": 200.0, "lr": 6e-4})
+    monitor.on_log(
+        50,
+        {"loss": 0.4, "clips_per_sec": 200.0, "lr": 6e-4, "val_loss": 0.45, "val_loss_ema": 0.5},
+    )
+    assert monitor.val_steps == [50]
+    (tmp_path / "plot.png").write_bytes(monitor._plot_png())

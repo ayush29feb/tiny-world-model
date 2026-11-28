@@ -53,9 +53,7 @@ def test_clips_start_at_random_points_in_the_game():
 
 def test_consecutive_samples_come_from_different_games():
     clips = take(clip_stream(seed=0, num_bots=64), 64)
-    follow_on = sum(
-        np.array_equal(a.frames[-1], b.frames[0]) for a, b in itertools.pairwise(clips)
-    )
+    follow_on = sum(np.array_equal(a.frames[-1], b.frames[0]) for a, b in itertools.pairwise(clips))
     # Picking the same bot twice in a row happens about 1 time in 64.
     assert follow_on <= 4, f"{follow_on} of 63 neighbouring clips are from the same game"
 
@@ -110,9 +108,7 @@ def test_iterating_again_replays_the_same_clips():
 
 
 def test_each_worker_plays_its_own_games():
-    loader = DataLoader(
-        DinoClips(seed=0, clip_len=8, num_bots=4), batch_size=4, num_workers=2
-    )
+    loader = DataLoader(DinoClips(seed=0, clip_len=8, num_bots=4), batch_size=4, num_workers=2)
     # With two workers, batches alternate between them: 0, 1, 0, 1, ...
     from_worker_0, from_worker_1 = take(iter(loader), 2)
     for a in from_worker_0["frames"]:

@@ -29,6 +29,9 @@ class LiveMonitor:
         self.speeds: list[float] = []
         self.gpu_utils: list[float | None] = []
         self.gpu_mem: float | None = None
+        self.val_steps: list[int] = []
+        self.val_losses: list[float] = []
+        self.val_losses_ema: list[float] = []
         # Explicit handles, so each output updates in place. (display(display_id=True)
         # returns None outside a notebook, which would break running this in tests.)
         self.plot, self.samples = DisplayHandle(), DisplayHandle()
@@ -43,6 +46,10 @@ class LiveMonitor:
         self.speeds.append(metrics["clips_per_sec"])
         self.gpu_utils.append(metrics.get("gpu_util"))
         self.gpu_mem = metrics.get("gpu_mem_gb", self.gpu_mem)
+        if "val_loss" in metrics:
+            self.val_steps.append(step)
+            self.val_losses.append(metrics["val_loss"])
+            self.val_losses_ema.append(metrics["val_loss_ema"])
         self.plot.update(Image(data=self._plot_png(), format="png"))
 
     def on_samples(self, step: int, clips) -> None:
@@ -75,11 +82,18 @@ class LiveMonitor:
         fig = Figure(figsize=(11, 3.2), dpi=100)
         loss_ax, speed_ax = fig.subplots(1, 2, gridspec_kw={"width_ratios": [2, 1]})
 
-        loss_ax.plot(self.steps, self.losses, color="#c8c8c8", lw=1, label="loss")
-        loss_ax.plot(self.steps, self._smoothed(), color="#2a6fdb", lw=2, label="smoothed")
+        loss_ax.plot(self.steps, self.losses, color="#c8c8c8", lw=1, label="train")
+        loss_ax.plot(self.steps, self._smoothed(), color="#2a6fdb", lw=2, label="train, smoothed")
+        title = f"step {self.steps[-1]:,}: train {self.losses[-1]:.4f}"
+        if self.val_steps:
+            loss_ax.plot(self.val_steps, self.val_losses, "o-", color="#e07b39", ms=3, lw=1.5,
+                         label="val")
+            loss_ax.plot(self.val_steps, self.val_losses_ema, "s-", color="#2e9e5b", ms=3,
+                         lw=1.5, label="val, EMA (what samples use)")
+            title += f", val {self.val_losses[-1]:.4f} (EMA {self.val_losses_ema[-1]:.4f})"
         loss_ax.set_yscale("log")
         loss_ax.set_xlabel("step")
-        loss_ax.set_title(f"flow-matching loss: {self.losses[-1]:.4f} at step {self.steps[-1]:,}")
+        loss_ax.set_title(title)
         loss_ax.grid(alpha=0.3, which="both")
         loss_ax.legend(frameon=False)
 

@@ -131,3 +131,75 @@ def test_training_reduces_the_loss():
         flow_matching_loss(model, clips).backward()
         opt.step()
     assert avg_loss() < 0.7 * before
+
+
+# --- schedule and validation loss -------------------------------------------------
+
+from tiny_world_model.flow import (  # noqa: E402
+    VALIDATION_TS,
+    Schedule,
+    sampling_times,
+    shift_t,
+    validation_loss,
+)
+
+
+def test_shift_moves_times_toward_noise_and_keeps_the_ends():
+    t = torch.tensor([0.0, 0.5, 1.0])
+    assert torch.allclose(shift_t(t, 1.0), t)
+    assert torch.allclose(shift_t(t, 3.0), torch.tensor([0.0, 0.25, 1.0]))
+    grid = torch.linspace(0, 1, 101)
+    assert torch.all(shift_t(grid, 3.0) <= grid + 1e-6)
+    assert torch.all(torch.diff(shift_t(grid, 3.0)) > 0), "shift must keep the order"
+
+
+@pytest.mark.parametrize(
+    "schedule, median, heavy_noise",
+    [
+        (Schedule("uniform", shift=1.0), 0.50, 0.30),
+        (Schedule("logit_normal", shift=1.0), 0.50, 0.20),
+        (Schedule(), 0.25, 0.60),  # the default: logit-normal shifted by 3
+    ],
+)
+def test_schedule_concentrates_training_where_expected(schedule, median, heavy_noise):
+    t = schedule.sample(200_000, "cpu", generator=torch.Generator().manual_seed(0))
+    assert t.min() > 0 and t.max() < 1
+    assert t.median().item() == pytest.approx(median, abs=0.01)
+    assert (t < 0.3).float().mean().item() == pytest.approx(heavy_noise, abs=0.01)
+
+
+def test_unknown_schedule_is_rejected():
+    with pytest.raises(ValueError, match="unknown dist"):
+        Schedule("cosine").sample(4, "cpu")
+
+
+def test_sampling_times_run_from_noise_to_data():
+    times = sampling_times(20, 3.0)
+    assert times[0] == 0 and times[-1] == 1 and len(times) == 21
+    assert torch.all(torch.diff(times) > 0)
+    assert (times < 0.25).sum() > (times > 0.75).sum(), "more steps at high noise"
+
+
+def test_validation_loss_is_deterministic():
+    torch.manual_seed(0)
+    model = DiT(TINY)
+    for p in model.out.parameters():
+        p.data.normal_(0, 0.1)  # make the output non-zero
+    frames = real_clips(2, frames=4)
+    noise = torch.randn(2, TINY.num_tokens, 128)
+    first = validation_loss(model, frames, noise)
+    torch.randn(100)  # disturb the global RNG: the result must not depend on it
+    assert validation_loss(model, frames, noise) == first
+    assert len(VALIDATION_TS) == 8 and VALIDATION_TS[0] == 0.0625
+
+
+def test_untrained_validation_loss_is_the_velocity_size():
+    # An untrained model predicts zero, so the loss is the mean of (x1 - x0)^2 = 1 + 1.
+    frames = real_clips(2, frames=4)
+    noise = torch.randn(2, TINY.num_tokens, 128, generator=torch.Generator().manual_seed(0))
+    assert validation_loss(DiT(TINY), frames, noise) == pytest.approx(2.0, abs=0.05)
+
+
+def test_sampling_with_a_shift_still_gives_bool_clips():
+    clips = sample(DiT(TINY), num_clips=2, steps=4, shift=3.0)
+    assert clips.shape == (2, 4, 48, 128) and clips.dtype == torch.bool
