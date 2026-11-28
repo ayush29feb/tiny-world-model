@@ -38,6 +38,7 @@ class TrainConfig:
     weight_decay: float = 0.0
     grad_clip: float = 1.0
     ema_decay: float = 0.999  # samples come from an exponential moving average of weights
+    reset_ema: bool = False  # on resume, restart the EMA from the trained weights
     amp: bool = True  # fp16 mixed precision on CUDA; ignored elsewhere
 
     data_seed: int = 0
@@ -81,6 +82,17 @@ def _lr_at(step: int, cfg: TrainConfig) -> float:
     return cfg.lr * min(1.0, (step + 1) / max(cfg.warmup_steps, 1))
 
 
+def ema_decay_at(updates: int, max_decay: float) -> float:
+    """EMA decay after `updates` updates: low at first, rising to `max_decay`.
+
+    A fixed 0.999 from step 0 keeps 0.999^n of the untrained model, which is still
+    37% after 1,000 steps. That model's output layer starts at zero, so the EMA
+    predicts velocities that are far too small and samples stay close to the starting
+    noise. Warming up the decay makes the EMA follow training closely at first.
+    """
+    return min(max_decay, (1 + updates) / (10 + updates))
+
+
 @torch.no_grad()
 def _update_ema(ema: DiT, model: DiT, decay: float) -> None:
     for e, p in zip(ema.parameters(), model.parameters(), strict=True):
@@ -91,7 +103,9 @@ def _checkpoint_path(cfg: TrainConfig) -> Path | None:
     return Path(cfg.checkpoint_dir) / "checkpoint.pt" if cfg.checkpoint_dir else None
 
 
-def save_checkpoint(path: Path, step: int, model, ema, opt, scaler, cfg: TrainConfig) -> None:
+def save_checkpoint(
+    path: Path, step: int, model, ema, opt, scaler, cfg: TrainConfig, ema_updates: int
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     # Write, then rename: a runtime killed mid-save leaves the previous checkpoint intact.
@@ -100,6 +114,7 @@ def save_checkpoint(path: Path, step: int, model, ema, opt, scaler, cfg: TrainCo
             "step": step,
             "model": model.state_dict(),
             "ema": ema.state_dict(),
+            "ema_updates": ema_updates,
             "opt": opt.state_dict(),
             "scaler": scaler.state_dict(),
             "config": asdict(cfg),
@@ -121,16 +136,25 @@ def train(cfg: TrainConfig | None = None, monitor=None) -> DiT:
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
-    start = 0
+    start, ema_updates = 0, 0
     ckpt = _checkpoint_path(cfg)
     if ckpt is not None and ckpt.exists():
         state = torch.load(ckpt, map_location=device, weights_only=False)
         model.load_state_dict(state["model"])
-        ema.load_state_dict(state["ema"])
         opt.load_state_dict(state["opt"])
         scaler.load_state_dict(state["scaler"])
         start = state["step"]
-        print(f"resumed from {ckpt} at step {start}", flush=True)
+        # Checkpoints from before the EMA warmup have no "ema_updates", and their EMA
+        # still holds a large share of the untrained model. Restart it from the
+        # trained weights instead.
+        if cfg.reset_ema or "ema_updates" not in state:
+            ema.load_state_dict(state["model"])
+            why = "asked to" if cfg.reset_ema else "checkpoint predates EMA warmup"
+            print(f"resumed from {ckpt} at step {start}; EMA restarted ({why})", flush=True)
+        else:
+            ema.load_state_dict(state["ema"])
+            ema_updates = state["ema_updates"]
+            print(f"resumed from {ckpt} at step {start}", flush=True)
 
     # Clips have one more frame than actions; clip_len = frames - 1 gives the model's size.
     # Offsetting the seed by the resume step avoids replaying clips already trained on.
@@ -166,7 +190,8 @@ def train(cfg: TrainConfig | None = None, monitor=None) -> DiT:
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
         scaler.step(opt)
         scaler.update()
-        _update_ema(ema, model, cfg.ema_decay)
+        _update_ema(ema, model, ema_decay_at(ema_updates, cfg.ema_decay))
+        ema_updates += 1
 
         window_loss += loss.item()
         window_steps += 1
@@ -195,6 +220,6 @@ def train(cfg: TrainConfig | None = None, monitor=None) -> DiT:
             paused += time.perf_counter() - sampling_start
 
         if ckpt is not None and (done % cfg.checkpoint_every == 0 or done == cfg.steps):
-            save_checkpoint(ckpt, done, model, ema, opt, scaler, cfg)
+            save_checkpoint(ckpt, done, model, ema, opt, scaler, cfg, ema_updates)
 
     return ema

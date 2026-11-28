@@ -89,3 +89,63 @@ def test_live_monitor_runs_outside_a_notebook(tmp_path, capsys):
     monitor.on_samples(75, torch.rand(2, 4, 48, 128) < 0.1)
     assert (tmp_path / "samples_0000075.gif").exists()
     assert monitor._plot_png().startswith(b"\x89PNG")
+
+
+# --- EMA warmup ------------------------------------------------------------------
+
+
+def test_ema_decay_warms_up_to_its_maximum():
+    from tiny_world_model.train import ema_decay_at
+
+    decays = [ema_decay_at(n, 0.999) for n in (0, 10, 100, 1000, 100_000)]
+    assert decays == sorted(decays), "decay should only rise"
+    assert decays[0] < 0.2
+    assert decays[-1] == 0.999
+    # The share of the untrained model left in the EMA after 1,000 updates.
+    leftover = 1.0
+    for n in range(1000):
+        leftover *= ema_decay_at(n, 0.999)
+    assert leftover < 1e-3  # with a fixed 0.999 it would be 0.999**1000, about 37%
+
+
+def _same_weights(a, b):
+    return all(torch.equal(x, y) for x, y in zip(a.values(), b.values(), strict=True))
+
+
+def test_checkpoint_records_ema_updates(tmp_path):
+    cfg = tiny_config(steps=4, checkpoint_dir=str(tmp_path), checkpoint_every=2)
+    train(cfg, monitor=Recorder())
+    assert torch.load(tmp_path / "checkpoint.pt", weights_only=False)["ema_updates"] == 4
+
+
+def test_resuming_a_pre_warmup_checkpoint_restarts_the_ema(tmp_path):
+    cfg = tiny_config(steps=4, checkpoint_dir=str(tmp_path), checkpoint_every=2)
+    train(cfg, monitor=Recorder())
+    path = tmp_path / "checkpoint.pt"
+    state = torch.load(path, weights_only=False)
+    # Make it look like a checkpoint saved before the fix: no update count, and an
+    # EMA that is nothing like the trained weights.
+    del state["ema_updates"]
+    state["ema"] = {k: torch.zeros_like(v) for k, v in state["ema"].items()}
+    torch.save(state, path)
+
+    ema = train(cfg, monitor=Recorder())  # already at step 4: resumes and trains 0 steps
+    assert _same_weights(ema.state_dict(), state["model"])
+
+
+def test_resuming_a_new_checkpoint_keeps_its_ema(tmp_path):
+    cfg = tiny_config(steps=4, checkpoint_dir=str(tmp_path), checkpoint_every=2)
+    train(cfg, monitor=Recorder())
+    state = torch.load(tmp_path / "checkpoint.pt", weights_only=False)
+    ema = train(cfg, monitor=Recorder())
+    assert _same_weights(ema.state_dict(), state["ema"])
+    assert not _same_weights(ema.state_dict(), state["model"])
+
+
+def test_reset_ema_option_restarts_it(tmp_path):
+    cfg = tiny_config(steps=4, checkpoint_dir=str(tmp_path), checkpoint_every=2)
+    train(cfg, monitor=Recorder())
+    state = torch.load(tmp_path / "checkpoint.pt", weights_only=False)
+    reset = tiny_config(steps=4, checkpoint_dir=str(tmp_path), reset_ema=True)
+    ema = train(reset, monitor=Recorder())
+    assert _same_weights(ema.state_dict(), state["model"])

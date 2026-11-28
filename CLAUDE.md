@@ -171,8 +171,10 @@ has not been run yet.
 ### Training (`train.py`)
 
 AdamW, lr 3e-4 with 500 warmup steps then constant, grad clip 1.0, batch 32.
-**Samples always come from an EMA of the weights (decay 0.999)**, drawn from the same
-fixed noise each time so progress is comparable. fp16 autocast + GradScaler on CUDA
+**Samples always come from an EMA of the weights**, drawn from the same fixed noise each
+time so progress is comparable. The EMA decay warms up as `min(0.999, (1+n)/(10+n))`
+over its n updates (see the gotcha below). The samples panel shows the fraction of
+pixels on: real clips are ~5%, and ~50% means the samples are still noise. fp16 autocast + GradScaler on CUDA
 (the T4 has no fast bf16); full precision elsewhere. With `checkpoint_dir` set, it saves
 every `checkpoint_every` steps (write, then rename) and resumes automatically; the data
 seed is offset by the resume step so resumed runs don't replay the same clips.
@@ -183,13 +185,20 @@ seed is offset by the resume step so resumed runs don't replay the same clips.
 |---|---|---|
 | Data generation | 1 CPU core | ~1,400 clips/s |
 | Training, width 128 | Apple M-series GPU (MPS) | **~13 clips/s**, flat for batch 8–32, fp32/bf16/fp16 alike |
-| Training, width 128 | Colab T4 | not measured yet |
+| Training, width 128 | Colab T4, batch 32, fp16 | **~100 clips/s** (~3 steps/s; 20k steps ≈ 1.8 h) |
 
-On the Mac the model is ~100× slower than the data and fully compute-bound, so it's
-only good for checking that things run. Train on Colab.
+Training is model-bound everywhere: 2 data workers make ~2,700 clips/s, 27× what the
+T4 trains on. The Mac is only good for checking that things run. Train on Colab.
 
 ### Gotchas
 
+- **An EMA with a fixed 0.999 decay from step 0 makes samples look like pure noise**
+  (~50% of pixels on, no structure) for thousands of steps, even while the loss falls
+  normally. It still holds 0.999ⁿ of the untrained model (37% at step 1,000), whose
+  output layer is zero, so its velocities are too small to move samples off the noise.
+  The first Colab run hit this at step 1,000. Fixed with the decay warmup; resuming a
+  checkpoint saved before the fix (no `ema_updates` key) restarts the EMA from the
+  trained weights, and `TrainConfig(reset_ema=True)` forces that.
 - **Don't judge samples by "% of pixels matching".** ~95% of pixels are background, so
   an empty frame already matches ~95%. Look at the samples, or measure how many
   *on* pixels are reproduced.

@@ -13,6 +13,8 @@ import base64
 import io
 from pathlib import Path
 
+import numpy as np
+
 from tiny_world_model.render import clips_to_gif
 
 
@@ -47,10 +49,12 @@ class LiveMonitor:
             self.save_dir.mkdir(parents=True, exist_ok=True)
             (self.save_dir / f"samples_{step:07d}.gif").write_bytes(gif)
         encoded = base64.b64encode(gif).decode()
+        on = float(np.asarray(clips).mean())
         self.samples.update(
             HTML(
                 f"<b>Generated from noise at step {step:,}</b> (EMA weights, same noise "
-                f"each time)<br><img src='data:image/gif;base64,{encoded}'>"
+                f"each time). Pixels on: <b>{on:.1%}</b> (real clips: about 5%; "
+                f"near 50% means still noise)<br><img src='data:image/gif;base64,{encoded}'>"
             )
         )
 
