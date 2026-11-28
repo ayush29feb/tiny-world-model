@@ -5,23 +5,21 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tiny-world-model"
 version = "0.1.0"
-description = "Tiny world model experiments"
+description = "Tiny pixel games whose frames are binary bitmaps, for world-model experiments"
 requires-python = ">=3.10"
-dependencies = [
-    "numpy>=1.24",
-    "einops>=0.7",
-    "tqdm>=4.66",
-    "omegaconf>=2.3",
-]
+dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
-# Torch is intentionally NOT a hard dep: Colab ships its own CUDA build.
-# Install locally with:  pip install -e ".[local]"
-local = ["torch>=2.2", "torchvision>=0.17"]
+# The game engine is pure numpy. pygame is only needed to play it in a window.
+play = ["pygame-ce>=2.5"]
+# Only for games.dino.dataset. Not a hard dependency: Colab ships its own CUDA
+# build of torch, and installing a second one breaks the runtime.
+train = ["torch>=2.2"]
 dev = ["pytest>=8", "ruff>=0.6"]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+include = ["games*"]
 
 [tool.ruff]
 line-length = 100
@@ -30,11 +28,6 @@ target-version = "py310"
 [tool.ruff.lint]
 # Pinned explicitly so a developer's global ruff config cannot change CI results.
 select = ["E", "F", "I", "UP", "B", "SIM"]
-
-[tool.ruff.lint.per-file-ignores]
-# Notebooks legitimately import inside cells, in cell order rather than sorted.
-"notebooks/*.ipynb" = ["I001", "E402"]
-"tests/*.py" = ["E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -14,11 +14,10 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - name: Install (CPU torch — no GPU needed for these tests)
-        run: |
+      # CPU-only torch keeps the install small and still runs the DataLoader tests.
+      # pygame is not needed: the engine is pure numpy.
+      - run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[dev]"
       - run: ruff check .
       - run: pytest -q
-      # Exercises the preflight script itself; no GPU on the runner.
-      - run: python scripts/gpu_check.py --device cpu --steps 10 --batch-size 16
