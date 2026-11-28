@@ -12,7 +12,7 @@ draws GAME OVER.
 ```bash
 uv venv --python 3.13
 source .venv/bin/activate
-uv pip install -e ".[play,train,dev]"
+uv pip install -e ".[play,train,notebook,dev]"
 python -m games.dino.play
 ```
 
@@ -103,6 +103,29 @@ in their games.
   guard, because workers start fresh Python processes that re-import it. Colab and
   Linux don't need this.
 
+## Generating clips with flow matching
+
+`tiny_world_model/` is a small diffusion transformer (DiT, 2.5M parameters) trained
+with flow matching to generate 32-frame clips from noise. Clips are cut losslessly into
+1,536 tokens of 2 frames × 8 × 8 pixels; there is no VAE.
+
+Train it on a Colab GPU:
+
+```
+https://colab.research.google.com/github/ayush29feb/tiny-world-model/blob/main/notebooks/train_dino_dit.ipynb
+```
+
+Set **Runtime → Change runtime type → T4 GPU** and run the cells. The training cell
+shows a live loss plot and, every 500 steps, clips generated from noise. Checkpoints
+and those GIFs are saved to Google Drive, and re-running the cell resumes.
+
+Or from Python:
+
+```python
+from tiny_world_model.train import TrainConfig, train
+ema = train(TrainConfig(steps=20_000, checkpoint_dir="runs/dit128"))
+```
+
 ## Layout
 
 ```
@@ -114,7 +137,9 @@ games/
     rollout.py     scripted bots and the clip generator (numpy only)
     dataset.py     DinoClips, a PyTorch IterableDataset over the generator
     play.py        pygame window for playing it yourself
-tests/             engine and data tests; no pygame needed
+tiny_world_model/  tokenizer, DiT, flow matching, training loop, live monitor
+notebooks/         Colab training notebook
+tests/             engine, data, model and training tests; no pygame needed
 ```
 
 ```bash

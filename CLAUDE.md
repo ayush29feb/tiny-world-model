@@ -1,9 +1,10 @@
 # tiny-world-model
 
-Tiny pixel games whose frames are binary bitmaps, used to train a world model: given
-past frames and the player's key presses, predict the next frame. Training data is
-generated on the fly by bots playing the games inside PyTorch DataLoader workers.
-Nothing is recorded to disk. Training will run on Colab GPUs.
+Tiny pixel games whose frames are binary bitmaps, used to train generative video
+models of them. The current model is a flow-matching diffusion transformer that
+generates 32-frame dino clips from noise. Training data is generated on the fly by
+bots playing the games inside PyTorch DataLoader workers; nothing is recorded to
+disk. Training runs on Colab GPUs (`notebooks/train_dino_dit.ipynb`).
 
 **Keep this file current.** When the game, the data format or the data mix changes,
 update the relevant section here: shapes, dtypes, measured numbers and gotchas.
@@ -19,7 +20,16 @@ games/
     rollout.py     scripted bots and the clip generator (numpy only)
     dataset.py     DinoClips, a PyTorch IterableDataset (the only torch import)
     play.py        pygame window for a human (the only pygame import)
-tests/             engine and data tests; no pygame needed
+tiny_world_model/  the model (all torch)
+  tokenizer.py     patchify / unpatchify clips into 2x8x8 tubelet tokens (lossless)
+  dit.py           DiT: the diffusion transformer, DiTConfig
+  flow.py          flow-matching loss and Euler sampler
+  train.py         training loop: TrainConfig, train(), checkpoints, EMA
+  render.py        clips -> animated GIF grid
+  notebook.py      LiveMonitor: live loss plot + generated clips in Colab/Jupyter
+notebooks/
+  train_dino_dit.ipynb   Colab: clone, install, train with live display
+tests/             engine, data, model and training tests; no pygame needed
 ```
 
 ## Rules for game code
@@ -121,11 +131,82 @@ Not yet measured on Colab, whose CPUs are likely slower.
   start fresh Python processes that re-import the script, and code piped in on stdin
   can't be re-imported. Linux and Colab start workers differently and don't need it.
 
+## The model
+
+### Tokens
+
+A 32-frame clip (B, 32, 48, 128) is cut into **2 × 8 × 8 tubelets**: 2 frames × 8 rows
+× 8 columns = **128 values per token**, and a 16 × 6 × 16 grid = **1,536 tokens per
+clip**, ordered time, row, column. There is no VAE: the clips are already about the
+size of one Stable Diffusion latent, and a lossy encoder would blur exactly the pixels
+the game rules depend on (the one-pixel gap under the high bird, the 3×5 score
+digits). `unpatchify(patchify(x)) == x` exactly.
+
+Dataset clips have one more frame than actions, so the model's 32 frames come from
+`DinoClips(clip_len=31)`. `TrainConfig` does this automatically.
+
+### DiT
+
+`DiTConfig()` defaults: **width 128, 8 blocks, 4 heads, 2.49M parameters.** Each
+128-value token goes through `Linear(128 → dim)`, gets learned positions (separate
+time, row and column tables, added together) and full attention over all 1,536
+tokens. Blocks are conditioned on the flow time with adaLN-Zero, so an untrained
+model outputs exactly zero. Positions are learned, so a model only works on the clip
+size it was built for.
+
+Width is a setting, kept separate from the patch size. Width 128 was chosen to start
+because at 1,536 tokens most compute is attention between tokens: width 256 costs
+about 2.7× more per layer, not 4×. To cut compute, reduce tokens (factorized
+space/time attention, fewer frames) before reducing width. A 128 vs 256 comparison
+has not been run yet.
+
+### Flow matching (`flow.py`)
+
+- Pixels are mapped to **−1 (off) / +1 (on)**: `to_signed`. Generated values are
+  thresholded at 0: `to_bool`.
+- **t = 0 is noise, t = 1 is data.** `x_t = (1 − t)·noise + t·data`, the model predicts
+  velocity `v = data − noise`, loss is MSE. t is sampled uniformly.
+- Sampling: 50 Euler steps from t = 0 to 1, then threshold.
+
+### Training (`train.py`)
+
+AdamW, lr 3e-4 with 500 warmup steps then constant, grad clip 1.0, batch 32.
+**Samples always come from an EMA of the weights (decay 0.999)**, drawn from the same
+fixed noise each time so progress is comparable. fp16 autocast + GradScaler on CUDA
+(the T4 has no fast bf16); full precision elsewhere. With `checkpoint_dir` set, it saves
+every `checkpoint_every` steps (write, then rename) and resumes automatically; the data
+seed is offset by the resume step so resumed runs don't replay the same clips.
+
+### Measured speeds
+
+| What | Where | Speed |
+|---|---|---|
+| Data generation | 1 CPU core | ~1,400 clips/s |
+| Training, width 128 | Apple M-series GPU (MPS) | **~13 clips/s**, flat for batch 8–32, fp32/bf16/fp16 alike |
+| Training, width 128 | Colab T4 | not measured yet |
+
+On the Mac the model is ~100× slower than the data and fully compute-bound, so it's
+only good for checking that things run. Train on Colab.
+
+### Gotchas
+
+- **Don't judge samples by "% of pixels matching".** ~95% of pixels are background, so
+  an empty frame already matches ~95%. Look at the samples, or measure how many
+  *on* pixels are reproduced.
+- **Early in training the model learns the layout first:** the ground line, the dots
+  under it and digit-like marks in the score corner. The dino and obstacles come later.
+  After 510 steps on 8 clips (MPS) there was layout but no dino. That is expected, not
+  a bug.
+- The first `clips_per_sec` reading in each run is low: it includes the DataLoader
+  workers fast-forwarding their bots at startup.
+- Outside a notebook, `IPython.display.display(..., display_id=True)` returns `None`.
+  `LiveMonitor` creates `DisplayHandle`s directly so it also runs in tests.
+
 ## Commands
 
 ```bash
 source .venv/bin/activate
-uv pip install -e ".[play,train,dev]"
+uv pip install -e ".[play,train,notebook,dev]"
 pytest -q
 ruff check .
 python -m games.dino.play
@@ -133,5 +214,8 @@ python -m games.dino.play
 
 ## Colab
 
-Keep `torch` out of the hard dependencies (it lives in the `train` extra), since Colab
-ships its own CUDA build and installing a second one breaks the runtime.
+Open `notebooks/train_dino_dit.ipynb` in Colab (it clones the public repo, so pushed
+code is what runs there). It installs with plain `pip install -e .`, no extras: keep
+`torch` out of the hard dependencies (it lives in the `train` extra), since Colab ships
+its own CUDA build and installing a second one breaks the runtime. Colab already has
+Pillow, matplotlib and IPython. Checkpoints and sample GIFs go to Google Drive.

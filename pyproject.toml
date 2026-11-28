@@ -12,14 +12,16 @@ dependencies = ["numpy>=1.24"]
 [project.optional-dependencies]
 # The game engine is pure numpy. pygame is only needed to play it in a window.
 play = ["pygame-ce>=2.5"]
-# Only for games.dino.dataset. Not a hard dependency: Colab ships its own CUDA
+# For games.dino.dataset and the model in tiny_world_model/. Not a hard dependency: Colab ships its own CUDA
 # build of torch, and installing a second one breaks the runtime.
-train = ["torch>=2.2"]
+train = ["torch>=2.2", "pillow>=9"]
+# For the live training display. Colab already has both.
+notebook = ["matplotlib>=3.7", "ipython>=8"]
 dev = ["pytest>=8", "ruff>=0.6"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["games*"]
+include = ["games*", "tiny_world_model*"]
 
 [tool.ruff]
 line-length = 100
