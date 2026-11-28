@@ -203,3 +203,94 @@ def test_untrained_validation_loss_is_the_velocity_size():
 def test_sampling_with_a_shift_still_gives_bool_clips():
     clips = sample(DiT(TINY), num_clips=2, steps=4, shift=3.0)
     assert clips.shape == (2, 4, 48, 128) and clips.dtype == torch.bool
+
+
+# --- 3D RoPE ----------------------------------------------------------------------
+
+from tiny_world_model.dit import apply_rope, rope_axis_dims, rope_tables  # noqa: E402
+
+GRID = (16, 6, 16)  # (time, rows, columns) of the default 32-frame clip
+
+
+def token_index(t, r, c, grid=GRID):
+    return (t * grid[1] + r) * grid[2] + c
+
+
+def test_head_dims_split_evenly_across_the_three_axes():
+    assert rope_axis_dims(32) == (12, 10, 10)
+    for head_dim in (6, 8, 16, 32, 64, 96):
+        dims = rope_axis_dims(head_dim)
+        assert sum(dims) == head_dim and all(d % 2 == 0 and d > 0 for d in dims)
+    for bad in (5, 4, 33):
+        with pytest.raises(ValueError):
+            rope_axis_dims(bad)
+
+
+def test_rope_keeps_vector_lengths():
+    cos, sin = rope_tables(GRID, 32, 100.0)
+    x = torch.randn(2, 4, 1536, 32)
+    assert torch.allclose(apply_rope(x, cos, sin).norm(dim=-1), x.norm(dim=-1), atol=1e-4)
+
+
+def test_attention_scores_depend_only_on_the_offset_between_tokens():
+    cos, sin = rope_tables(GRID, 32, 100.0)
+    torch.manual_seed(0)
+    q, k = torch.randn(32), torch.randn(32)
+
+    def score(i, j):
+        qi = apply_rope(q.expand(1536, 32), cos, sin)[i]
+        kj = apply_rope(k.expand(1536, 32), cos, sin)[j]
+        return (qi @ kj).item()
+
+    # The same offset (2 later in time, 1 row down, 3 columns right) at three places.
+    pairs = [((0, 0, 0), (2, 1, 3)), ((5, 2, 7), (7, 3, 10)), ((13, 4, 12), (15, 5, 15))]
+    scores = [score(token_index(*a), token_index(*b)) for a, b in pairs]
+    assert scores[1] == pytest.approx(scores[0], abs=1e-4)
+    assert scores[2] == pytest.approx(scores[0], abs=1e-4)
+    # A different offset gives a different score.
+    assert score(token_index(0, 0, 0), token_index(2, 1, 4)) != pytest.approx(scores[0], abs=1e-3)
+
+
+def test_each_axis_rotates_only_its_own_dimensions():
+    cos, sin = rope_tables(GRID, 32, 100.0)
+    x = torch.randn(32).expand(1536, 32)
+    rotated = apply_rope(x, cos, sin)
+    start = rotated[token_index(3, 2, 5)]
+    # Moving along time changes only the time dimensions (the first 12), etc.
+    for moved, axis_dims in (
+        ((4, 2, 5), slice(0, 12)),
+        ((3, 3, 5), slice(12, 22)),
+        ((3, 2, 6), slice(22, 32)),
+    ):
+        diff = (rotated[token_index(*moved)] - start).abs() > 1e-6
+        assert diff[axis_dims].any()
+        diff[axis_dims] = False
+        assert not diff.any(), f"moving to {moved} changed another axis's dimensions"
+
+
+@pytest.mark.parametrize(
+    "positions, learned, rope",
+    [
+        ("rope", False, True),
+        ("learned", True, False),
+        ("both", True, True),
+    ],
+)
+def test_position_options(positions, learned, rope):
+    model = DiT(DiTConfig(frames=4, dim=32, depth=2, heads=2, positions=positions))
+    names = set(model.state_dict())
+    assert ("pos_t" in names) is learned
+    assert "rope_cos" not in names, "RoPE tables are rebuilt, not saved"
+    assert hasattr(model, "rope_cos") is rope
+    x = torch.randn(2, model.config.num_tokens, 128)
+    assert model(x, torch.rand(2)).shape == x.shape
+
+
+def test_unknown_positions_are_rejected():
+    with pytest.raises(ValueError, match="positions"):
+        DiT(DiTConfig(positions="sinusoidal"))
+
+
+def test_rope_is_the_default():
+    assert DiTConfig().positions == "rope"
+    assert not any(n.startswith("pos_") for n, _ in DiT().named_parameters())

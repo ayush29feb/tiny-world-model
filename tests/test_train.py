@@ -251,3 +251,36 @@ def test_live_monitor_plots_validation_loss(tmp_path):
     )
     assert monitor.val_steps == [50]
     (tmp_path / "plot.png").write_bytes(monitor._plot_png())
+
+
+# --- resuming with a different model ---------------------------------------------------
+
+
+def test_resuming_with_a_different_model_is_refused(tmp_path):
+    learned = tiny_config(
+        steps=2,
+        model=DiTConfig(frames=4, dim=32, depth=2, heads=2, positions="learned"),
+        checkpoint_dir=str(tmp_path),
+        checkpoint_every=2,
+    )
+    train(learned, monitor=Recorder())
+    rope = tiny_config(steps=4, checkpoint_dir=str(tmp_path))  # TINY now uses RoPE
+    with pytest.raises(ValueError, match="positions: checkpoint has 'learned', config has 'rope'"):
+        train(rope, monitor=Recorder())
+
+
+def test_checkpoints_from_before_rope_resume_as_learned(tmp_path):
+    learned_model = DiTConfig(frames=4, dim=32, depth=2, heads=2, positions="learned")
+    cfg = tiny_config(
+        steps=2, model=learned_model, checkpoint_dir=str(tmp_path), checkpoint_every=2
+    )
+    train(cfg, monitor=Recorder())
+    path = tmp_path / "checkpoint.pt"
+    state = torch.load(path, weights_only=False)
+    for key in ("positions", "rope_theta"):  # make it look like an older checkpoint
+        del state["config"]["model"][key]
+    torch.save(state, path)
+
+    rec = Recorder()
+    train(tiny_config(steps=4, model=learned_model, checkpoint_dir=str(tmp_path)), monitor=rec)
+    assert [s for s, _ in rec.logs] == [4]  # resumed at step 2

@@ -124,6 +124,10 @@ Not yet measured on Colab, whose CPUs are likely slower.
 
 ### Gotchas
 
+- **A run only resumes a checkpoint made by the same model.** `train()` compares the
+  model settings saved in the checkpoint with the config and stops with the
+  differences if they differ (`check_same_model`); older checkpoints without
+  `positions` count as `"learned"`. Use a new `checkpoint_dir` per architecture.
 - **Compare runs by the validation loss, never the training loss.** The training loss
   averages over the schedule's noise levels, and noisier levels have a higher loss, so
   changing the schedule moves it with no change in the model. In a small test run the
@@ -151,12 +155,27 @@ Dataset clips have one more frame than actions, so the model's 32 frames come fr
 
 ### DiT
 
-`DiTConfig()` defaults: **width 128, 8 blocks, 4 heads, 2.49M parameters.** Each
-128-value token goes through `Linear(128 → dim)`, gets learned positions (separate
-time, row and column tables, added together) and full attention over all 1,536
-tokens. Blocks are conditioned on the flow time with adaLN-Zero, so an untrained
-model outputs exactly zero. Positions are learned, so a model only works on the clip
-size it was built for.
+`DiTConfig()` defaults: **width 128, 8 blocks, 4 heads, 3D RoPE, 2.49M parameters.**
+Each 128-value token goes through `Linear(128 → dim)` and full attention over all
+1,536 tokens. Blocks are conditioned on the flow time with adaLN-Zero, so an
+untrained model outputs exactly zero. A model only works on the clip size it was
+built for.
+
+**Positions (`DiTConfig.positions`):**
+- `"rope"` (default): 3D rotary embeddings. Inside attention, queries and keys are
+  rotated by angles set by each token's time, row and column, so scores depend only
+  on the offset between tokens. A 32-dim head is split **12 / 10 / 10** between time,
+  rows and columns (`rope_axis_dims`). **θ = 100**, not the usual 10,000: across a
+  16 × 6 × 16 grid, 10,000 would leave most frequencies barely turning. The cos/sin
+  tables are buffers rebuilt from the config, not saved in checkpoints.
+- `"learned"`: learned time, row and column vectors added to the tokens. The first
+  Colab run used this.
+- `"both"`: both. RoPE is relative only, while this game has things at fixed absolute
+  places (the score top-right, the ground on row 42). Models with only RoPE usually
+  learn absolute layout from the grid edges; if the score or ground drift, try this.
+
+Toy comparison (width 64, 2 blocks, 4-frame clips, 800 steps, CPU): validation loss
+0.689 with RoPE vs 0.709 learned, same speed. Not yet compared at full size.
 
 Width is a setting, kept separate from the patch size. Width 128 was chosen to start
 because at 1,536 tokens most compute is attention between tokens: width 256 costs
@@ -222,6 +241,10 @@ T4 trains on. The Mac is only good for checking that things run. Train on Colab.
 
 ### Gotchas
 
+- **A run only resumes a checkpoint made by the same model.** `train()` compares the
+  model settings saved in the checkpoint with the config and stops with the
+  differences if they differ (`check_same_model`); older checkpoints without
+  `positions` count as `"learned"`. Use a new `checkpoint_dir` per architecture.
 - **Compare runs by the validation loss, never the training loss.** The training loss
   averages over the schedule's noise levels, and noisier levels have a higher loss, so
   changing the schedule moves it with no change in the model. In a small test run the

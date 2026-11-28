@@ -140,6 +140,33 @@ def _checkpoint_path(cfg: TrainConfig) -> Path | None:
     return Path(cfg.checkpoint_dir) / "checkpoint.pt" if cfg.checkpoint_dir else None
 
 
+# Model settings added after the first checkpoints were saved, and what those older
+# checkpoints used. A checkpoint without a setting was trained with this value.
+_LEGACY_MODEL_SETTINGS = {"positions": "learned", "rope_theta": 100.0}
+
+
+def check_same_model(saved: dict, current: DiTConfig, path: Path) -> None:
+    """Refuse to resume a checkpoint that was trained with a different model.
+
+    Loading weights into a different architecture either fails with a confusing
+    error, or worse, succeeds silently (learned and "both" positions share weight
+    names).
+    """
+    now = asdict(current)
+    differences = [
+        f"{key}: checkpoint has {saved.get(key, _LEGACY_MODEL_SETTINGS.get(key))!r}, "
+        f"config has {value!r}"
+        for key, value in now.items()
+        if saved.get(key, _LEGACY_MODEL_SETTINGS.get(key)) != value
+    ]
+    if differences:
+        raise ValueError(
+            f"{path} was trained with a different model, so it can't be resumed:\n  "
+            + "\n  ".join(differences)
+            + "\nUse a new checkpoint_dir to start a fresh run, or match the config."
+        )
+
+
 def save_checkpoint(
     path: Path, step: int, model, ema, opt, scaler, cfg: TrainConfig, ema_updates: int
 ) -> None:
@@ -181,6 +208,7 @@ def train(cfg: TrainConfig | None = None, monitor=None) -> DiT:
     ckpt = _checkpoint_path(cfg)
     if ckpt is not None and ckpt.exists():
         state = torch.load(ckpt, map_location=device, weights_only=False)
+        check_same_model(state["config"]["model"], cfg.model, ckpt)
         model.load_state_dict(state["model"])
         opt.load_state_dict(state["opt"])
         scaler.load_state_dict(state["scaler"])
