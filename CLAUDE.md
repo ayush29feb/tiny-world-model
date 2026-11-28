@@ -207,7 +207,12 @@ has not been run yet.
 
 ### Training (`train.py`)
 
-AdamW (fused on CUDA), lr 6e-4 with 500 warmup steps then constant, grad clip 1.0,
+AdamW (fused on CUDA), peak lr 1e-3 after 500 linear warmup steps, then a **cosine
+decay to 10% of the peak (1e-4) at the last step** (`lr_decay="cosine"`, `min_lr_ratio`;
+`"constant"` keeps the old flat lr). The cosine is shaped by `steps`, so raising `steps`
+when resuming moves the run to a different point on the curve (the lr jumps up). The
+first Colab run (lr 6e-4, constant) flattened at a training loss of ~0.085 from step
+~15k on; the decay is meant to keep improving there. Grad clip 1.0,
 batch 64. Every 250 steps it computes the validation loss for both the trained and the
 EMA weights; both are plotted with the training loss.
 **Samples always come from an EMA of the weights**, drawn from the same fixed noise each

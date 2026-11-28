@@ -284,3 +284,26 @@ def test_checkpoints_from_before_rope_resume_as_learned(tmp_path):
     rec = Recorder()
     train(tiny_config(steps=4, model=learned_model, checkpoint_dir=str(tmp_path)), monitor=rec)
     assert [s for s, _ in rec.logs] == [4]  # resumed at step 2
+
+
+# --- learning-rate schedule ------------------------------------------------------------
+
+
+def test_cosine_decay_runs_from_peak_to_floor():
+    from tiny_world_model.train import _lr_at
+
+    cfg = TrainConfig(steps=1000, warmup_steps=100, lr=1e-3, min_lr_ratio=0.1)
+    lrs = [_lr_at(s, cfg) for s in range(cfg.steps)]
+    assert lrs[99] == pytest.approx(1e-3)  # end of warmup: the peak
+    assert max(lrs) == pytest.approx(1e-3)
+    assert lrs[549] == pytest.approx(5.5e-4)  # halfway through the decay
+    assert lrs[-1] == pytest.approx(1e-4)  # last step: the floor
+    decay = lrs[100:]
+    assert decay == sorted(decay, reverse=True)
+
+
+def test_constant_lr_stays_at_peak():
+    from tiny_world_model.train import _lr_at
+
+    cfg = TrainConfig(steps=1000, warmup_steps=100, lr=1e-3, lr_decay="constant")
+    assert {_lr_at(s, cfg) for s in range(100, 1000)} == {1e-3}

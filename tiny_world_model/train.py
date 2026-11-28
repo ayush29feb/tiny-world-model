@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import copy
 import itertools
+import math
 import subprocess
 import time
 from dataclasses import asdict, dataclass, field
@@ -36,8 +37,13 @@ class TrainConfig:
     model: DiTConfig = field(default_factory=DiTConfig)
     steps: int = 20_000
     batch_size: int = 64  # width-128 matmuls are small; bigger batches keep a GPU busier
-    lr: float = 6e-4
+    lr: float = 1e-3  # peak learning rate, reached at the end of warmup
     warmup_steps: int = 500
+    # After warmup: "cosine" decays from lr to lr * min_lr_ratio by the last step;
+    # "constant" stays at lr. Cosine is shaped by `steps`, so changing `steps` on a
+    # resumed run moves where on the curve it continues.
+    lr_decay: str = "cosine"
+    min_lr_ratio: float = 0.1
     weight_decay: float = 0.0
     grad_clip: float = 1.0
     ema_decay: float = 0.999  # samples come from an exponential moving average of weights
@@ -99,8 +105,17 @@ def default_device() -> str:
 
 
 def _lr_at(step: int, cfg: TrainConfig) -> float:
-    """Linear warmup, then constant."""
-    return cfg.lr * min(1.0, (step + 1) / max(cfg.warmup_steps, 1))
+    """Linear warmup to cfg.lr, then constant or a cosine decay to lr * min_lr_ratio."""
+    if step < cfg.warmup_steps:
+        return cfg.lr * (step + 1) / cfg.warmup_steps
+    if cfg.lr_decay == "constant":
+        return cfg.lr
+    if cfg.lr_decay != "cosine":
+        raise ValueError(f"lr_decay must be 'cosine' or 'constant', got {cfg.lr_decay!r}")
+    decay_steps = max(cfg.steps - cfg.warmup_steps, 1)
+    progress = min((step + 1 - cfg.warmup_steps) / decay_steps, 1.0)
+    low = cfg.lr * cfg.min_lr_ratio
+    return low + (cfg.lr - low) * 0.5 * (1 + math.cos(math.pi * progress))
 
 
 def ema_decay_at(updates: int, max_decay: float) -> float:
