@@ -219,3 +219,9 @@ code is what runs there). It installs with plain `pip install -e .`, no extras: 
 `torch` out of the hard dependencies (it lives in the `train` extra), since Colab ships
 its own CUDA build and installing a second one breaks the runtime. Colab already has
 Pillow, matplotlib and IPython. Checkpoints and sample GIFs go to Google Drive.
+
+**Colab's runtime (late 2026) is Python 3.13 with IPython 7.34**, and that IPython's
+`%load_ext autoreload` crashes with `No module named 'imp'` (Python 3.12 removed `imp`).
+The notebook tries autoreload and falls back to telling you to restart the session
+after pulling new code. Notebook code must work on IPython 7.34: test it with a
+Python 3.13 venv and `ipython==7.34.0`, running cells as scripts via `ipython file.py`.

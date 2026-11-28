@@ -14,7 +14,7 @@ dependencies = ["numpy>=1.24"]
 play = ["pygame-ce>=2.5"]
 # For games.dino.dataset and the model in tiny_world_model/. Not a hard dependency: Colab ships its own CUDA
 # build of torch, and installing a second one breaks the runtime.
-train = ["torch>=2.2", "pillow>=9"]
+train = ["torch>=2.3", "pillow>=9"]  # 2.3+ for torch.amp.GradScaler
 # For the live training display. Colab already has both.
 notebook = ["matplotlib>=3.7", "ipython>=8"]
 dev = ["pytest>=8", "ruff>=0.6"]
